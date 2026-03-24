@@ -8,13 +8,21 @@
 #include "platform.h"
 #include <funchook.h>
 
-struct SteamNetworkingIdentity;
-
-// defines STEAM_PRIVATE_API
+#if __has_include(<steam/steam_api_common.h>)
+// defines STEAM_PRIVATE_API on newer SDKs
 #include <steam/steam_api_common.h>
 
 #undef STEAM_PRIVATE_API // we need these public so we can proxy them
 #define STEAM_PRIVATE_API(...) __VA_ARGS__
+#endif
+
+#if __has_include(<steam/isteamnetworkingmessages.h>)
+#define CSGOGC_NEW_STEAMWORKS_AUTH_TICKET 1
+#else
+#define CSGOGC_NEW_STEAMWORKS_AUTH_TICKET 0
+#endif
+
+#define CSGOGC_OLD_STEAMWORKS (!CSGOGC_NEW_STEAMWORKS_AUTH_TICKET)
 
 #include <steam/steam_api.h>
 #include <steam/steam_gameserver.h>
@@ -114,7 +122,7 @@ class GCWrapper final
 {
 public:
     template<typename... Args>
-    GCWrapper(ISteamNetworkingMessages *networkingMessages, Args &&...args)
+    GCWrapper(ISteamNetworking *networkingMessages, Args &&...args)
         : m_gc{ std::forward<Args>(args)... }
         , m_networking{ networkingMessages }
     {
@@ -167,12 +175,12 @@ public:
         if (m_server)
         {
             assert(!s_serverGC);
-            s_serverGC = new GCWrapper<ServerGC, NetworkingServer>{ SteamGameServerNetworkingMessages() };
+            s_serverGC = new GCWrapper<ServerGC, NetworkingServer>{ SteamGameServerNetworking() };
         }
         else
         {
             assert(!s_clientGC);
-            s_clientGC = new GCWrapper<ClientGC, NetworkingClient>{ SteamNetworkingMessages(), steamId };
+            s_clientGC = new GCWrapper<ClientGC, NetworkingClient>{ SteamNetworking(), steamId };
         }
     }
 
@@ -426,6 +434,7 @@ public:
         m_original->SetOverlayNotificationInset(nHorizontalInset, nVerticalInset);
     }
 
+    #if !CSGOGC_OLD_STEAMWORKS
     bool IsSteamInBigPictureMode() override
     {
         return m_original->IsSteamInBigPictureMode();
@@ -480,6 +489,7 @@ public:
     {
         m_original->SetGameLauncherMode(bLauncherMode);
     }
+    #endif
 };
 
 static std::vector<UserStatsReceived_t> s_userStatsReceivedCallbacks;
@@ -1112,6 +1122,7 @@ public:
         return m_original->GetVoiceOptimalSampleRate();
     }
 
+    #if CSGOGC_NEW_STEAMWORKS_AUTH_TICKET
     HAuthTicket GetAuthSessionTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket, const SteamNetworkingIdentity *pSteamNetworkingIdentity) override
     {
         HAuthTicket ticket = m_original->GetAuthSessionTicket(pTicket, cbMaxTicket, pcbTicket, pSteamNetworkingIdentity);
@@ -1122,6 +1133,18 @@ public:
 
         return ticket;
     }
+    #else
+    HAuthTicket GetAuthSessionTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket) override
+    {
+        HAuthTicket ticket = m_original->GetAuthSessionTicket(pTicket, cbMaxTicket, pcbTicket);
+        if (s_clientGC && ticket != k_HAuthTicketInvalid)
+        {
+            s_clientGC->m_networking.SetAuthTicket(ticket, pTicket, *pcbTicket);
+        }
+
+        return ticket;
+    }
+    #endif
 
     EBeginAuthSessionResult BeginAuthSession(const void *pAuthTicket, int cbAuthTicket, CSteamID steamID) override
     {
@@ -1183,6 +1206,7 @@ public:
         return m_original->RequestStoreAuthURL(pchRedirectURL);
     }
 
+    #if !CSGOGC_OLD_STEAMWORKS
     bool BIsPhoneVerified() override
     {
         return m_original->BIsPhoneVerified();
@@ -1217,6 +1241,7 @@ public:
     {
         return m_original->BSetDurationControlOnlineState(eNewState);
     }
+    #endif
 };
 
 class SteamMatchmakingServersProxy : public ISteamMatchmakingServers
@@ -1530,7 +1555,7 @@ public:
         return PROXY_INTERFACE(GetISteamGameServer, hSteamUser, hSteamPipe, pchVersion);
     }
 
-    void SetLocalIPBinding(const SteamIPAddress_t &unIP, uint16 usPort) override
+    void SetLocalIPBinding(uint32 unIP, uint16 usPort) override
     {
         m_original->SetLocalIPBinding(unIP, usPort);
     }
@@ -1590,10 +1615,12 @@ public:
         return PROXY_INTERFACE(GetISteamScreenshots, hSteamuser, hSteamPipe, pchVersion);
     }
 
+    #if !CSGOGC_OLD_STEAMWORKS
     ISteamGameSearch *GetISteamGameSearch(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override
     {
         return PROXY_INTERFACE(GetISteamGameSearch, hSteamuser, hSteamPipe, pchVersion);
     }
+    #endif
 
     void RunFrame() override
     {
@@ -1620,10 +1647,17 @@ public:
         return PROXY_INTERFACE(GetISteamHTTP, hSteamuser, hSteamPipe, pchVersion);
     }
 
+    #if CSGOGC_OLD_STEAMWORKS
+    ISteamUnifiedMessages *GetISteamUnifiedMessages(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override
+    {
+        return PROXY_INTERFACE(GetISteamUnifiedMessages, hSteamuser, hSteamPipe, pchVersion);
+    }
+    #else
     void *DEPRECATED_GetISteamUnifiedMessages(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override
     {
         return PROXY_INTERFACE(DEPRECATED_GetISteamUnifiedMessages, hSteamuser, hSteamPipe, pchVersion);
     }
+    #endif
 
     ISteamController *GetISteamController(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override
     {
@@ -1655,6 +1689,17 @@ public:
         return PROXY_INTERFACE(GetISteamHTMLSurface, hSteamuser, hSteamPipe, pchVersion);
     }
 
+    #if CSGOGC_OLD_STEAMWORKS
+    void Set_SteamAPI_CPostAPIResultInProcess(SteamAPI_PostAPIResultInProcess_t func) override
+    {
+        m_original->Set_SteamAPI_CPostAPIResultInProcess(func);
+    }
+
+    void Remove_SteamAPI_CPostAPIResultInProcess(SteamAPI_PostAPIResultInProcess_t func) override
+    {
+        m_original->Remove_SteamAPI_CPostAPIResultInProcess(func);
+    }
+    #else
     void DEPRECATED_Set_SteamAPI_CPostAPIResultInProcess(void (*func)()) override
     {
         m_original->DEPRECATED_Set_SteamAPI_CPostAPIResultInProcess(func);
@@ -1664,6 +1709,7 @@ public:
     {
         m_original->DEPRECATED_Remove_SteamAPI_CPostAPIResultInProcess(func);
     }
+    #endif
 
     void Set_SteamAPI_CCheckCallbackRegisteredInProcess(SteamAPI_CheckCallbackRegistered_t func) override
     {
@@ -1680,6 +1726,7 @@ public:
         return PROXY_INTERFACE(GetISteamVideo, hSteamuser, hSteamPipe, pchVersion);
     }
 
+    #if !CSGOGC_OLD_STEAMWORKS
     ISteamParentalSettings *GetISteamParentalSettings(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override
     {
         return PROXY_INTERFACE(GetISteamParentalSettings, hSteamuser, hSteamPipe, pchVersion);
@@ -1705,6 +1752,7 @@ public:
         m_proxies.clear();
         m_original->DestroyAllInterfaces();
     }
+    #endif
 };
 
 static SteamClientProxy s_steamClientProxy;
@@ -1973,7 +2021,7 @@ static void Hk_SteamGameServer_RunCallbacks()
         SteamNetworkingMessage_t *message;
         while (s_serverGC->m_networking.ReceiveMessage(message))
         {
-            s_serverGC->m_gc.PostToGC(GCEvent::NetMessage, message->m_identityPeer.GetSteamID64(), message->GetData(), message->GetSize());
+            s_serverGC->m_gc.PostToGC(GCEvent::NetMessage, message->m_steamIDPeer.ConvertToUint64(), message->GetData(), message->GetSize());
             message->Release();
         }
     }
@@ -2011,7 +2059,7 @@ static bool InitializeSteamAPI(bool dedicated)
 {
     if (dedicated)
     {
-        return SteamGameServer_Init(0, 0, STEAMGAMESERVER_QUERY_PORT_SHARED, eServerModeNoAuthentication, "1.38.7.9");
+        return SteamGameServer_Init(0, 0, 0, MASTERSERVERUPDATERPORT_USEGAMESOCKETSHARE, eServerModeNoAuthentication, "1.38.7.9");
     }
     else
     {

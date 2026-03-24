@@ -2,7 +2,7 @@
 #include "networking_client.h"
 #include "gc_client.h"
 
-NetworkingClient::NetworkingClient(ISteamNetworkingMessages *networkingMessages)
+NetworkingClient::NetworkingClient(ISteamNetworking *networkingMessages)
     : m_networkingMessages{ networkingMessages }
     , m_sessionRequest{ this, &NetworkingClient::OnSessionRequest }
     , m_sessionFailed{ this, &NetworkingClient::OnSessionFailed }
@@ -11,10 +11,30 @@ NetworkingClient::NetworkingClient(ISteamNetworkingMessages *networkingMessages)
 
 void NetworkingClient::Update(ClientGC *gc)
 {
-    SteamNetworkingMessage_t *message;
-    while (m_networkingMessages->ReceiveMessagesOnChannel(NetMessageChannel, &message, 1))
+    uint32_t size;
+    while (m_networkingMessages->IsP2PPacketAvailable(&size, NetMessageChannel))
     {
-        uint64_t steamId = message->m_identityPeer.GetSteamID64();
+        auto *message = new SteamNetworkingMessage_t{};
+        message->m_buffer.resize(size);
+
+        uint32_t readSize = 0;
+        if (!m_networkingMessages->ReadP2PPacket(
+                message->m_buffer.data(),
+                static_cast<uint32_t>(message->m_buffer.size()),
+                &readSize,
+                &message->m_steamIDPeer,
+                NetMessageChannel))
+        {
+            message->Release();
+            continue;
+        }
+
+        if (readSize != message->m_buffer.size())
+        {
+            message->m_buffer.resize(readSize);
+        }
+
+        uint64_t steamId = message->m_steamIDPeer.ConvertToUint64();
 
         // pass 0 as type so it gets parsed from the message
         GCMessageRead messageRead{ 0, message->GetData(), message->GetSize() };
@@ -104,18 +124,14 @@ void NetworkingClient::SendMessage(const void *data, uint32_t size)
         return;
     }
 
-    // mikkotodo check return
-    SteamNetworkingIdentity identity;
-    identity.SetSteamID64(m_serverSteamId);
-
-    [[maybe_unused]] EResult result = m_networkingMessages->SendMessageToUser(
-        identity,
+    [[maybe_unused]] bool result = m_networkingMessages->SendP2PPacket(
+        CSteamID{ m_serverSteamId },
         data,
         size,
         NetMessageSendFlags,
         NetMessageChannel);
 
-    assert(result == k_EResultOK);
+    assert(result);
 }
 
 void NetworkingClient::SetAuthTicket(uint32_t handle, const void *data, uint32_t size)
@@ -141,9 +157,7 @@ void NetworkingClient::ClearAuthTicket(uint32_t handle)
         Platform::Print("NetworkingClient: closing p2p session with %llu\n", it->second.steamId);
 
         // we had a session so close the connection
-        SteamNetworkingIdentity identity;
-        identity.SetSteamID64(it->second.steamId);
-        m_networkingMessages->CloseChannelWithUser(identity, NetMessageChannel);
+        m_networkingMessages->CloseP2PChannelWithUser(CSteamID{ it->second.steamId }, NetMessageChannel);
 
         // was this our current gameserver? if it was, clear it
         if (it->second.steamId == m_serverSteamId)
@@ -156,19 +170,21 @@ void NetworkingClient::ClearAuthTicket(uint32_t handle)
     m_tickets.erase(it);
 }
 
-void NetworkingClient::OnSessionRequest(SteamNetworkingMessagesSessionRequest_t *param)
+void NetworkingClient::OnSessionRequest(P2PSessionRequest_t *param)
 {
-    if (!param->m_identityRemote.GetSteamID().BGameServerAccount())
+    if (!param->m_steamIDRemote.BGameServerAccount())
     {
         // csgo_gc related connections come from gameservers
         return;
     }
 
     // accept the connection, we should receive the k_EMsgNetworkConnect message
-    m_networkingMessages->AcceptSessionWithUser(param->m_identityRemote);
+    m_networkingMessages->AcceptP2PSessionWithUser(param->m_steamIDRemote);
 }
 
-void NetworkingClient::OnSessionFailed(SteamNetworkingMessagesSessionFailed_t *param)
+void NetworkingClient::OnSessionFailed(P2PSessionConnectFail_t *param)
 {
-    Platform::Print("NetworkingClient::OnSessionFailed: %s\n", param->m_info.m_szEndDebug);
+    Platform::Print("NetworkingClient::OnSessionFailed: %llu, error %u\n",
+        param->m_steamIDRemote.ConvertToUint64(),
+        static_cast<uint32_t>(param->m_eP2PSessionError));
 }

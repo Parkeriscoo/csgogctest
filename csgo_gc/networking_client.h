@@ -15,7 +15,7 @@ struct AuthTicket
 class NetworkingClient
 {
 public:
-    NetworkingClient(ISteamNetworkingMessages *networkingMessages);
+    NetworkingClient(ISteamNetworking *networkingMessages);
 
     void Update(ClientGC *gc);
 
@@ -29,18 +29,18 @@ private:
     // return false if it wasn't handled, in which case we pass it to m_clientGC
     bool HandleMessage(ClientGC *gc, uint64_t steamId, GCMessageRead &message);
 
-    ISteamNetworkingMessages *const m_networkingMessages;
+    ISteamNetworking *const m_networkingMessages;
     uint64_t m_serverSteamId{};
 
     std::unordered_map<uint32_t, AuthTicket> m_tickets;
 
     STEAM_CALLBACK(NetworkingClient,
         OnSessionRequest,
-        SteamNetworkingMessagesSessionRequest_t,
+        P2PSessionRequest_t,
         m_sessionRequest);
 
     STEAM_CALLBACK(NetworkingClient,
         OnSessionFailed,
-        SteamNetworkingMessagesSessionFailed_t,
+        P2PSessionConnectFail_t,
         m_sessionFailed);
 };

@@ -2,7 +2,7 @@
 #include "networking_server.h"
 #include "gc_message.h"
 
-NetworkingServer::NetworkingServer(ISteamNetworkingMessages *networkingMessages)
+NetworkingServer::NetworkingServer(ISteamNetworking *networkingMessages)
     : m_networkingMessages{ networkingMessages }
     , m_sessionRequest{ this, &NetworkingServer::OnSessionRequest }
     , m_sessionFailed{ this, &NetworkingServer::OnSessionFailed }
@@ -11,12 +11,33 @@ NetworkingServer::NetworkingServer(ISteamNetworkingMessages *networkingMessages)
 
 bool NetworkingServer::ReceiveMessage(SteamNetworkingMessage_t *&message)
 {
-    if (!m_networkingMessages->ReceiveMessagesOnChannel(NetMessageChannel, &message, 1))
+    uint32_t size;
+    if (!m_networkingMessages->IsP2PPacketAvailable(&size, NetMessageChannel))
     {
         return false;
     }
 
-    uint64_t steamId = message->m_identityPeer.GetSteamID64();
+    message = new SteamNetworkingMessage_t{};
+    message->m_buffer.resize(size);
+
+    uint32_t readSize = 0;
+    if (!m_networkingMessages->ReadP2PPacket(
+            message->m_buffer.data(),
+            static_cast<uint32_t>(message->m_buffer.size()),
+            &readSize,
+            &message->m_steamIDPeer,
+            NetMessageChannel))
+    {
+        message->Release();
+        return false;
+    }
+
+    if (readSize != message->m_buffer.size())
+    {
+        message->m_buffer.resize(readSize);
+    }
+
+    uint64_t steamId = message->m_steamIDPeer.ConvertToUint64();
 
     // see if we have a session
     if (!m_clients.Has(steamId))
@@ -30,32 +51,31 @@ bool NetworkingServer::ReceiveMessage(SteamNetworkingMessage_t *&message)
 }
 
 // helper for SteamNetworkingMessages::SendMessageToUser that attempts to do some kind of error handling
-static void SendMessageToUser(ISteamNetworkingMessages *networkingMessages, uint64_t steamId, const void *data, uint32_t size)
+static void SendMessageToUser(ISteamNetworking *networkingMessages, uint64_t steamId, const void *data, uint32_t size)
 {
-    SteamNetworkingIdentity identity;
-    identity.SetSteamID64(steamId);
+    CSteamID identity{ steamId };
 
-    EResult result = networkingMessages->SendMessageToUser(
+    bool result = networkingMessages->SendP2PPacket(
         identity,
         data,
         size,
         NetMessageSendFlags,
         NetMessageChannel);
 
-    if (result != k_EResultOK)
+    if (!result)
     {
-        Platform::Print("SendMessageToUser failed for %llu: %d, closing session and trying again\n", steamId, result);
+        Platform::Print("SendMessageToUser failed for %llu, closing session and trying again\n", steamId);
 
-        networkingMessages->CloseChannelWithUser(identity, NetMessageChannel);
+        networkingMessages->CloseP2PChannelWithUser(identity, NetMessageChannel);
 
-        result = networkingMessages->SendMessageToUser(
+        result = networkingMessages->SendP2PPacket(
             identity,
             data,
             size,
             NetMessageSendFlags,
             NetMessageChannel);
 
-        if (result != k_EResultOK)
+        if (!result)
         {
             // not much we can do in this situation i guess
             Platform::Print("SendMessageToUser failed for %llu\n", steamId);
@@ -90,9 +110,7 @@ void NetworkingServer::ClientDisconnected(uint64_t steamId)
         return;
     }
 
-    SteamNetworkingIdentity identity;
-    identity.SetSteamID64(steamId);
-    m_networkingMessages->CloseChannelWithUser(identity, NetMessageChannel);
+    m_networkingMessages->CloseP2PChannelWithUser(CSteamID{ steamId }, NetMessageChannel);
 }
 
 void NetworkingServer::SendMessage(uint64_t steamId, const void *data, uint32_t size)
@@ -106,9 +124,9 @@ void NetworkingServer::SendMessage(uint64_t steamId, const void *data, uint32_t 
     SendMessageToUser(m_networkingMessages, steamId, data, size);
 }
 
-void NetworkingServer::OnSessionRequest(SteamNetworkingMessagesSessionRequest_t *param)
+void NetworkingServer::OnSessionRequest(P2PSessionRequest_t *param)
 {
-    uint64_t steamId = param->m_identityRemote.GetSteamID64();
+    uint64_t steamId = param->m_steamIDRemote.ConvertToUint64();
 
     if (!m_clients.Has(steamId))
     {
@@ -118,15 +136,16 @@ void NetworkingServer::OnSessionRequest(SteamNetworkingMessagesSessionRequest_t 
 
     Platform::Print("%llu sent a session request, we were playing GC with them so accept\n");
 
-    if (!m_networkingMessages->AcceptSessionWithUser(param->m_identityRemote))
+    if (!m_networkingMessages->AcceptP2PSessionWithUser(param->m_steamIDRemote))
     {
-        Platform::Print("AcceptSessionWithUser with %llu failed???\n",
-            param->m_identityRemote.GetSteamID64());
+        Platform::Print("AcceptP2PSessionWithUser with %llu failed???\n", steamId);
     }
 }
 
-void NetworkingServer::OnSessionFailed(SteamNetworkingMessagesSessionFailed_t *param)
+void NetworkingServer::OnSessionFailed(P2PSessionConnectFail_t *param)
 {
     // don't do anything, rely on the auth session
-    Platform::Print("OnSessionFailed: %s\n", param->m_info.m_szEndDebug);
+    Platform::Print("OnSessionFailed: %llu, error %u\n",
+        param->m_steamIDRemote.ConvertToUint64(),
+        static_cast<uint32_t>(param->m_eP2PSessionError));
 }

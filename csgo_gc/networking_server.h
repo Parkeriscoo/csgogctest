@@ -1,6 +1,7 @@
 #pragma once
 
 #include "networking_shared.h"
+#include <steam/steam_gameserver.h>
 
 class GCMessageWrite;
 
@@ -31,7 +32,7 @@ private:
 class NetworkingServer
 {
 public:
-    NetworkingServer(ISteamNetworkingMessages *networkingMessages);
+    NetworkingServer(ISteamNetworking *networkingMessages);
 
     // caller need to call message->Release() because fuck you
     bool ReceiveMessage(SteamNetworkingMessage_t *&message);
@@ -42,16 +43,16 @@ public:
     void SendMessage(uint64_t steamId, const void *data, uint32_t size);
 
 private:
-    ISteamNetworkingMessages *const m_networkingMessages;
+    ISteamNetworking *const m_networkingMessages;
     ClientSet m_clients;
 
     STEAM_GAMESERVER_CALLBACK(NetworkingServer,
         OnSessionRequest,
-        SteamNetworkingMessagesSessionRequest_t,
+        P2PSessionRequest_t,
         m_sessionRequest);
 
     STEAM_GAMESERVER_CALLBACK(NetworkingServer,
         OnSessionFailed,
-        SteamNetworkingMessagesSessionFailed_t,
+        P2PSessionConnectFail_t,
         m_sessionFailed);
 };
